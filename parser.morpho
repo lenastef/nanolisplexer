@@ -1,0 +1,233 @@
+;;; Author: Snorri Agnarsson, 2024
+;;;
+;;; This program can be compiled and run using:
+;;;  java -jar morpho.jar -c parser.morpho
+;;;  java -cp .;morpho.jar is.hi.cs.morpho.Morpho parser fact.s
+;;; This assumes that NanoLispLexer.class is present in the
+;;; current directory, as well as morpho.jar.
+
+"parser.mexe" = main in
+!{{
+makeLexer =
+	obj(filename)
+	{
+		;;; Create an instance of the JFlex lexer for NanoLisp
+		val lexer = new "NanoLispLexer"(
+						(java.io.Reader)new "java.io.FileReader"(
+											("java.lang.String")filename
+																)
+									   );
+
+		msg get stream
+		{
+			var token, lexeme, line, column;
+			rec fun advance()
+			{
+				token = ("NanoLispLexer")lexer.#yylex();
+				if( token < 256 && token != 0 ) { token = char(token) };
+				lexeme = ("NanoLispLexer")lexer.#getLVal();
+				line = ("NanoLispLexer")lexer.#getLine();
+				column = ("NanoLispLexer")lexer.#getColumn();
+			};
+			rec fun name(token)
+			{
+				switch(token)
+				{
+				case '(': "'('";
+				case ')': "')'";
+				case 0: "EOF";
+				case 258: "LITERAL";
+				case 259: "NAME";
+				case 260: "IF";
+				case 261: "DEFINE";
+				case 262: "YYERRCODE";
+				default: "Unknown";
+				};
+			};
+			advance();
+			if( token == 0 ) { return #[] };
+			#[ \(name(token),lexeme,line,column) $ this.stream ]
+		};
+	};
+
+makeParser =
+	obj(filename)
+	{
+		;;; This is the stream of tokens/lexemes that have not yet
+		;;; been processed and passed over.
+		var stream = makeLexer(filename).stream;
+		
+		msg emit(f,args)
+		{
+			writeln(format(f,args));
+		};
+		
+		msg emit(s)
+		{
+			writeln(s);
+		};
+		
+		msg get line
+		{
+			streamHead(stream)[2];
+		};
+		
+		msg get column
+		{
+			streamHead(stream)[3];
+		};
+		
+		msg get lexeme
+		{
+			streamHead(stream)[1];
+		};
+		
+		msg get token
+		{
+			streamHead(stream)[0];
+		};
+		
+		msg get eof
+		{
+			stream==#[]
+		};
+		
+		msg over(t)
+		{
+			if( this.token != t ) { this.expected(t) };
+			this.advance()
+		};
+		
+		msg advance()
+		{
+			val res = streamHead(stream)[1];
+			stream = streamTail(stream);
+			res;
+		};
+		
+		msg lookaheadToken(i)
+		{
+			var s = stream;
+			while( i>0 )
+			{
+				if( s == #[] ) { return null };
+				i = i-1;
+				s = streamTail(s);
+			};
+			if( s == #[] ) { return null };
+			streamHead(s)[0]
+		};
+		
+		msg lookaheadLexeme(i)
+		{
+			var s = stream;
+			while( i>0 )
+			{
+				if( s == #[] ) { return null };
+				i = i-1;
+				s = streamTail(s);
+			};
+			if( s == #[] ) { return null };
+			streamHead(s)[1]
+		};
+
+		msg expected(e)
+		{
+			writeln(format("Expected %s found %s in line %d, column %d",[e,this.lexeme,this.line,this.column]));
+			exit(1);
+		};
+		
+		msg program()
+		{
+			if( this.eof )
+			{
+				this.emit("<program> ::= ''");
+				return []
+			};
+			this.emit("<program> ::= <function> <program>");
+			this.function();
+			this.program();
+		};
+		
+		msg function()
+		{
+			this.emit("<function> ::= (define (NAME <names>) <expr>)");
+			this.over("'('");
+			this.over("DEFINE");
+			this.over("'('");
+			if( this.token != "NAME" ) { this.expected("function name") };
+			val name = this.advance();
+			this.names();
+			this.over("')'");
+			this.expr();
+			this.over("')'");
+		};
+		
+		msg names()
+		{
+			if( this.token != "NAME" )
+			{
+				this.emit("<names> ::= ''");
+				return []
+			};
+			this.emit("<names> ::= NAME <names>");
+			this.advance();
+			this.names();
+		};
+		
+		msg expr()
+		{
+			if( this.token == "LITERAL" )
+			{
+				this.emit("<expr> ::= LITERAL");
+				this.advance();
+				return []
+			};
+			if( this.token == "NAME" )
+			{
+				this.emit("<expr> ::= NAME");
+				this.advance();
+				return []
+			};
+			if( this.token != "'('" ) { this.expected("expression") };
+			this.advance();
+			if( this.token == "IF" )
+			{
+				this.emit("<expr> ::= (if <expr> <expr> <expr>)");
+				this.advance();
+				this.expr();
+				this.expr();
+				this.expr();
+				this.over("')'");
+				return []
+			};
+			if( this.token != "NAME" ) { this.expected("function name or 'if' following '('") };
+			this.emit("<expr> ::= (NAME <args>)");
+			this.advance();
+			this.args();
+			this.over("')'");
+			return [];
+		};
+		
+		msg args()
+		{
+			if( this.token == "')'" )
+			{
+				this.emit("<args> ::= ''");
+				return []
+			};
+			this.emit("<args> ::= <expr> <args>");
+			this.expr();
+			this.args();
+		};
+	};
+
+main =
+	fun()
+	{
+		makeParser(getArgs()[1]).program();
+	};
+}}
+*
+BASIS
+;

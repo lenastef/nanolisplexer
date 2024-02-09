@@ -1,0 +1,85 @@
+;;; Author: Snorri Agnarsson, 2024
+;;;
+;;; This program can be compiled and run using:
+;;;  java -jar morpho.jar -c lexer.morpho
+;;;  java -cp .;morpho.jar is.hi.cs.morpho.Morpho lexer fact.s
+;;; This assumes that NanoLispLexer.class is present in the
+;;; current directory.
+
+"lexer.mexe" = main in
+!{{
+makeLexer =
+	obj(filename)
+	{
+		val lexer = new "NanoLispLexer"(
+							(java.io.Reader)
+								new "java.io.FileReader"(
+										("java.lang.String")
+										filename
+														)
+									   );
+		var token, lexeme, line, column;
+		
+		msg advance()
+		{
+			token = ("NanoLispLexer")lexer.#yylex();
+			if( token < 256 && token != 0 ) { token = char(token) };
+			lexeme = ("NanoLispLexer")lexer.#getLVal();
+			line = ("NanoLispLexer")lexer.#getLine();
+			column = ("NanoLispLexer")lexer.#getColumn();
+		};
+
+		msg get token
+		{
+			token
+		};
+
+		msg get lexeme
+		{
+			lexeme
+		};
+
+		msg get line
+		{
+			line
+		};
+
+		msg get column
+		{
+			column
+		};
+		
+		msg get tokenName
+		{
+			return
+				switch(token)
+				{
+				case '(': "'('";
+				case ')': "')'";
+				case 0: "EOF";
+				case 258: "LITERAL";
+				case 259: "NAME";
+				case 260: "IF";
+				case 261: "DEFINE";
+				case 262: "YYERRCODE";
+				default: "Unknown";
+				}
+		};
+	};
+
+main =
+	fun()
+	{
+		val lexer = makeLexer(getArgs()[1]);
+		
+		lexer.advance();
+		while( lexer.token != 0 )
+		{
+			writeln([lexer.tokenName,lexer.lexeme,lexer.line,lexer.column]);
+			lexer.advance();
+		};
+	};
+}}
+*
+BASIS
+;

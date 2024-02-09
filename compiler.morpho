@@ -1,0 +1,430 @@
+;;; Author: Snorri Agnarsson, 2024
+;;;
+;;; This program can be compiled and run using:
+;;;  java -jar morpho.jar -c compiler.morpho
+;;;  java -cp .;morpho.jar is.hi.cs.morpho.Morpho compiler fact.s > fact.masm
+;;;  java -jar morpho.jar -c fact.masm
+;;;  java -jar morpho.jar fact
+;;; This assumes that NanoLispLexer.class is present in the
+;;; current directory, as well as morpho.jar.
+
+"compiler.mexe" = main in
+!{{
+makeLexer =
+	obj(filename)
+	{
+		;;; Create an instance of the JFlex lexer for NanoLisp
+		val lexer = new "NanoLispLexer"(
+						(java.io.Reader)new "java.io.FileReader"(
+											("java.lang.String")filename
+																)
+									   );
+
+		msg get stream
+		{
+			var token, lexeme, line, column;
+			rec fun advance()
+			{
+				token = ("NanoLispLexer")lexer.#yylex();
+				if( token < 256 && token != 0 ) { token = char(token) };
+				lexeme = ("NanoLispLexer")lexer.#getLVal();
+				line = ("NanoLispLexer")lexer.#getLine();
+				column = ("NanoLispLexer")lexer.#getColumn();
+			};
+			rec fun name(token)
+			{
+				switch(token)
+				{
+				case '(': "'('";
+				case ')': "')'";
+				case 0: "EOF";
+				case 258: "LITERAL";
+				case 259: "NAME";
+				case 260: "IF";
+				case 261: "DEFINE";
+				case 262: "YYERRCODE";
+				default: "Unknown";
+				};
+			};
+			advance();
+			if( token == 0 ) { return #[] };
+			#[ \(name(token),lexeme,line,column) $ this.stream ]
+		};
+	};
+
+makeParser =
+	obj(filename)
+	{
+		;;; This is the stream of tokens/lexemes that have not yet
+		;;; been processed and passed over.
+		var stream = makeLexer(filename).stream;
+		
+		var argPos;		;;; Inside a function this contains a hashmap
+						;;; that has the mapping from argument name to
+						;;; argument position.
+		var nextPos;	;;; Inside a function this contains the count
+						;;; of function dummy argument that have so far
+						;;; been registered into argPos.
+		
+		msg get line
+		{
+			streamHead(stream)[2];
+		};
+		
+		msg get column
+		{
+			streamHead(stream)[3];
+		};
+		
+		msg get lexeme
+		{
+			streamHead(stream)[1];
+		};
+		
+		msg get token
+		{
+			streamHead(stream)[0];
+		};
+		
+		msg get eof
+		{
+			stream==#[]
+		};
+		
+		msg over(t)
+		{
+			if( this.token != t ) { this.expected(t) };
+			this.advance()
+		};
+		
+		msg advance()
+		{
+			val res = streamHead(stream)[1];
+			stream = streamTail(stream);
+			res;
+		};
+		
+		msg lookaheadToken(i)
+		{
+			var s = stream;
+			while( i>0 )
+			{
+				if( s == #[] ) { return null };
+				i = i-1;
+				s = streamTail(s);
+			};
+			if( s == #[] ) { return null };
+			streamHead(s)[0]
+		};
+		
+		msg lookaheadLexeme(i)
+		{
+			var s = stream;
+			while( i>0 )
+			{
+				if( s == #[] ) { return null };
+				i = i-1;
+				s = streamTail(s);
+			};
+			if( s == #[] ) { return null };
+			streamHead(s)[1]
+		};
+
+		msg expected(e)
+		{
+			writeln(format("Expected %s found %s in line %d, column %d",[e,this.lexeme,this.line,this.column]));
+			exit(1);
+		};
+		
+		msg program()
+		{
+			if( this.eof ) { return [] };
+			this.function() : this.program();
+		};
+		
+		msg function()
+		{
+			argPos = makeHashMap();
+			nextPos = 0;
+			this.over("'('");
+			this.over("DEFINE");
+			this.over("'('");
+			if( this.token != "NAME" ) { this.expected("function name") };
+			val name = this.advance();
+			this.names();
+			this.over("')'");
+			val body = this.expr();
+			this.over("')'");
+			[name,nextPos,body]
+		};
+		
+		msg names()
+		{
+			if( this.token != "NAME" ) { return [] };
+			if( argPos[this.lexeme] != null ) { this.expected("a new argument name") };
+			argPos[this.advance()] = nextPos;
+			nextPos = nextPos+1;
+			this.names();
+		};
+		
+		msg expr()
+		{
+			if( this.token == "LITERAL" ) { return ["LITERAL",this.advance()] };
+			if( this.token == "NAME" )
+			{
+				val pos = argPos[this.lexeme];
+				if( !pos ) { this.expected("the name of a defined variable") };
+				this.advance();
+				return ["FETCH",pos]
+			};
+			if( this.token != "'('" ) { this.expected("expression") };
+			this.advance();
+			if( this.token == "IF" )
+			{
+				this.advance();
+				val cond = this.expr();
+				val thenpart = this.expr();
+				val elsepart = this.expr();
+				this.over("')'");
+				return ["IF",cond,thenpart,elsepart]
+			};
+			if( this.token != "NAME" ) { this.expected("function name or 'if' following '('") };
+			val name = this.advance();
+			val res = ["CALL",name,this.args()];
+			this.over("')'");
+			return res;
+		};
+		
+		msg args()
+		{
+			if( this.token == "')'" ) { return [] };
+			this.expr() : this.args();
+		};
+	};
+
+makeGenerator =
+	obj()
+	{
+		var lastLabel = 0;
+		
+		msg newLabel()
+		{
+			lastLabel = lastLabel+1;
+			lastLabel
+		};
+		
+		msg emit(f,args)
+		{
+			writeln(format(f,args));
+		};
+		
+		msg emit(s)
+		{
+			writeln(s);
+		};
+		
+		msg generateProgram(name,code)
+		{
+			this.emit("\"%s.mexe\" = main in",name);
+			this.emit("!{{");
+			while( code )
+			{
+				this.generateFunction(head(code));
+				code = tail(code);
+			};
+			this.emit("}}*BASIS;");
+		};
+		
+		msg generateFunction(code)
+		{
+			;;; code = [name,argcount,body]
+			val name = car(code);
+			val argcount = cadr(code);
+			val body = caddr(code);
+			this.emit("#\"%s[f%d]\" =",[name,argcount]);
+			this.emit("[");
+			this.generateExprR(body);
+			this.emit("];");
+		};
+		
+		msg generateExpr(expr)
+		{
+			match(expr)
+			{
+			case ["LITERAL",lit]:
+				{
+					this.emit("(MakeVal %s)",lit);
+				};
+			case ["FETCH",pos]:
+				{
+					this.emit("(Fetch %d)",pos);
+				};
+			case ["IF",cond,thenpart,elsepart]:
+				{
+					val elseLab = this.newLabel();
+					val endLab = this.newLabel();
+					this.generateJump(cond,0,elseLab);
+					this.generateExpr(thenpart);
+					this.emit("(Go _%d)",endLab);
+					this.emit("_%d:",elseLab);
+					this.generateExpr(elsepart);
+					this.emit("_%d:",endLab);
+				};
+			case ["CALL",name,args]:
+				{
+					val n = length(args);
+					if( n == 0 )
+					{
+						this.emit("(Call #\"%s[f0]\" 0)",name);
+						return [];
+					};
+					this.generateExpr(car(args));
+					args = cdr(args);
+					while( args )
+					{
+						this.generateExprP(car(args));
+						args = cdr(args);
+					};
+					this.emit("(Call #\"%s[f%d]\" %d)",[name,n,n]);
+				};
+			case _:
+				{
+					writeln("Unknown intermediate code: "++car(expr));
+					exit(1);
+				};
+			};
+		};
+
+		msg generateExprR(expr)
+		{
+			match(expr)
+			{
+			case ["LITERAL",lit]:
+				{
+					this.emit("(MakeValR %s)",lit);
+				};
+			case ["FETCH",pos]:
+				{
+					this.emit("(FetchR %d)",pos);
+				};
+			case ["IF",cond,thenpart,elsepart]:
+				{
+					val elseLab = this.newLabel();
+					this.generateJump(cond,0,elseLab);
+					this.generateExprR(thenpart);
+					this.emit("_%d:",elseLab);
+					this.generateExprR(elsepart);
+				};
+			case ["CALL",name,args]:
+				{
+					val n = length(args);
+					if( n == 0 )
+					{
+						this.emit("(CallR #\"%s[f0]\" 0)",name);
+						return [];
+					};
+					this.generateExpr(car(args));
+					args = cdr(args);
+					while( args )
+					{
+						this.generateExprP(car(args));
+						args = cdr(args);
+					};
+					this.emit("(CallR #\"%s[f%d]\" %d)",[name,n,n]);
+				};
+			case _:
+				{
+					this.generateExpr(expr);
+					this.emit("(Return)");
+				};
+			};
+		};
+		
+		msg generateExprP(expr)
+		{
+			match(expr)
+			{
+			case ["LITERAL",lit]:
+				{
+					this.emit("(MakeValP %s)",lit);
+				};
+			case ["FETCH",pos]:
+				{
+					this.emit("(FetchP %d)",pos);
+				};
+			case ["IF",cond,thenpart,elsepart]:
+				{
+					val elseLab = this.newLabel();
+					val endLab = this.newLabel();
+					this.generateJumpP(cond,0,elseLab);
+					this.generateExpr(thenpart);
+					this.emit("(Go _%d)",endLab);
+					this.emit("_%d:",elseLab);
+					this.generateExpr(elsepart);
+					this.emit("_%d:",endLab);
+				};
+			case ["CALL",name,args]:
+				{
+					val n = length(args);
+					if( n == 0 )
+					{
+						this.emit("(CallP #\"%s[f0]\" 0)",name);
+						return [];
+					};
+					while( args )
+					{
+						this.generateExprP(car(args));
+						args = cdr(args);
+					};
+					this.emit("(Call #\"%s[f%d]\" %d)",[name,n,n]);
+				};
+			case _:
+				{
+					this.emit("(Push)");
+					this.generateExpr(expr);
+				};
+			};
+		};
+		
+		msg generateJump(expr,thenLab,elseLab)
+		{
+			this.generateExpr(expr);
+			if( thenLab != 0 ) { this.emit("(GoTrue _%d)",thenLab) };
+			if( elseLab != 0 ) { this.emit("(GoFalse _%d)",elseLab) };
+		};
+
+		msg generateJumpP(expr,thenLab,elseLab)
+		{
+			this.generateExprP(expr);
+			if( thenLab != 0 ) { this.emit("(GoTrue _%d)",thenLab) };
+			if( elseLab != 0 ) { this.emit("(GoFalse _%d)",elseLab) };
+		};
+	};
+
+strip =
+	fun(filename)
+	{
+		var i = length(filename);
+		while( i>0 )
+		{
+			if( filename[i-1]=='.' )
+			{
+				return substring(filename,0,i-1);
+			};
+			i = i-1;
+		};
+		filename
+	};
+
+main =
+	fun()
+	{
+		val filename = getArgs()[1];
+		val name = strip(filename);
+		val p = makeParser(filename);
+		makeGenerator().generateProgram(name,p.program());
+	};
+}}
+*
+BASIS
+;
